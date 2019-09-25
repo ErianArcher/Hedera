@@ -524,7 +524,7 @@ class ShortestForwarding(app_manager.RyuApp):
                 for next_dpid in next_dpid_list:
                     if next_dpid in edge_dpids:
                         src_port = self.get_port_pair_from_link(self.awareness.link_to_port, dpid, next_dpid)[1]
-                        dpid2inport[next_dpid] = src_port
+                        edge_dpid2in_port[next_dpid] = src_port
 
             if ip_proto and L4_port and Flag:
                 if ip_proto == 6:
