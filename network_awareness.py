@@ -203,6 +203,9 @@ class NetworkAwareness(app_manager.RyuApp):
 			delay = 30
 		return delay
 
+	def get_bfs_successor(self, source):
+		return nx.bfs_successors(self.graph, source)
+
 	def create_port_map(self, switch_list):
 		"""
 			Create interior_port table and access_port table.

@@ -19,8 +19,10 @@
 from ryu import cfg
 from ryu.base import app_manager
 from ryu.controller import ofp_event
+from ryu.controller import event
 from ryu.controller.handler import MAIN_DISPATCHER, DEAD_DISPATCHER
 from ryu.controller.handler import set_ev_cls
+from ryu.controller.ofp_event import EventOFPStateChange
 from ryu.lib.dpid import str_to_dpid
 from ryu.ofproto import ofproto_v1_3
 from ryu.lib.packet import packet
@@ -62,10 +64,14 @@ class ShortestForwarding(app_manager.RyuApp):
         self._snoop = kwargs["igmplib"]
         self._snoop.set_querier_mode(dpid=str_to_dpid('0000000000000001'), server_port=2)
         self.datapaths = {}
+        """
+        | Multicast address: {path_dict}|
+        """
+        self.mcast_paths = {}
         self.weight = self.WEIGHT_MODEL[CONF.weight]
 
     @set_ev_cls(ofp_event.EventOFPStateChange, [MAIN_DISPATCHER, DEAD_DISPATCHER])
-    def _state_change_handler(self, ev):
+    def _ofp_state_change_handler(self, ev):
         """
             Collect datapath information.
         """
@@ -79,7 +85,7 @@ class ShortestForwarding(app_manager.RyuApp):
                 self.logger.debug('unregister datapath: %016x', datapath.id)
                 del self.datapaths[datapath.id]
 
-    @set_ev_cls(igmplib.EventPacketIn, MAIN_DISPATCHER)
+    @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
         '''
             In packet_in handler, we need to learn access_table by ARP and IP packets.
@@ -99,13 +105,10 @@ class ShortestForwarding(app_manager.RyuApp):
                 eth_type = pkt.get_protocols(ethernet.ethernet)[0].ethertype
                 src_ip = ip_pkt.src
                 dst_ip = ip_pkt.dst
-                self.shortest_forwarding(msg, eth_type, src_ip, dst_ip)
-                """
                 if not self._isMCastAddr(dst_ip):
                     self.shortest_forwarding(msg, eth_type, src_ip, dst_ip)
                 else:
                     self.shortest_forwarding_mcast(msg, eth_type, src_ip, dst_ip)
-                """
 
     def add_flow(self, dp, priority, match, actions, idle_timeout=0, hard_timeout=0):
         """
@@ -243,6 +246,72 @@ class ShortestForwarding(app_manager.RyuApp):
         else:
             pass
 
+    def get_path_mcast(self, src, mcast_addr, dsts):
+        # Prune the path cannot reach `dsts`
+        def dfs(path_dict, cur, dsts):
+            cur_sw_list = path_dict.get(cur)
+            if not cur_sw_list:
+                if not dsts.contains(cur):
+                    return False
+                else:
+                    return True
+            else:
+                for next_sw in cur_sw_list:
+                    good_path = dfs(path_dict, next_sw, dsts)
+                    if not good_path:
+                        path_dict.get(cur).remove(next_sw)
+                if not path_dict.get(cur):
+                    return False
+                else:
+                    return True
+        if not self.mcast_paths.has_key(mcast_addr):
+            bfs_dict = self.awareness.get_bfs_successor(src)
+            dfs(bfs_dict, src, dsts)
+            self.mcast_paths[mcast_addr] = bfs_dict
+        else:
+            bfs_dict = self.mcast_paths.get(mcast_addr)
+        return bfs_dict
+
+    def install_mcast_flows(self, datapaths, link_to_port, path_dict, src_sw, flow_info):
+        """
+            Install flow entries for datapaths.
+            path=[dpid1, dpid2, ...]
+            flow_info = (eth_type, src_ip, mcast_ip, in_port)
+            or
+            flow_info = (eth_type, src_ip, mcast_ip, in_port, ip_proto, Flag, L4_port)
+        """
+        # Generate flow rules for each switches on the path
+        if not path_dict:
+            self.logger.info("Path error!")
+            return
+        in_port = flow_info[3]
+        first_dp = datapaths[src_sw]
+        def dfs_path_dict(last_dpid, cur_dpid):
+            next_dpid_list = path_dict.get(cur_dpid)
+            port_pair = self.get_port_pair_from_link(link_to_port, last_dpid, cur_dpid)
+            port_pairs_next = [self.get_port_pair_from_link(link_to_port, cur_dpid, next_dpid) for next_dpid in
+                          next_dpid_list]
+            src_port = port_pair[1]
+            ports = [pair[0] for pair in port_pairs_next]
+            if src_port and ports:
+                group_id = int("".join(sorted(ports)))
+                datapath = datapaths[cur_dpid]
+                self.send_flow_mod(datapath, flow_info, src_port, group_id, isGroupId=True)
+            for next_dpid in next_dpid_list:
+                dfs_path_dict(cur_dpid, next_dpid)
+
+        # install flow for the src_sw
+        first_port_pairs_next = []
+        for next_dpid in path_dict.get(src_sw):
+            dfs_path_dict(src_sw, next_dpid)
+            first_port_pairs_next.append(self.get_port_pair_from_link(link_to_port, src_sw, next_dpid))
+
+        first_ports = [first_port_pairs_next[0] for pair in first_port_pairs_next]
+        if in_port and first_ports:
+            group_id = int("".join(sorted(first_ports)))
+            self.send_flow_mod(first_dp, flow_info, in_port, group_id, isGroupId=True)
+
+
     def get_sw(self, dpid, in_port, src, dst):
         """
             Get pair of source and destination switches.
@@ -263,7 +332,7 @@ class ShortestForwarding(app_manager.RyuApp):
         else:
             return None
 
-    def send_flow_mod(self, datapath, flow_info, src_port, dst_port):
+    def send_flow_mod(self, datapath, flow_info, src_port, dst_port, isGroupId = False):
         """
             Build flow entry, and send it to datapath.
             flow_info = (eth_type, src_ip, dst_ip, in_port)
@@ -272,7 +341,10 @@ class ShortestForwarding(app_manager.RyuApp):
         """
         parser = datapath.ofproto_parser
         actions = []
-        actions.append(parser.OFPActionOutput(dst_port))
+        if not isGroupId:
+            actions.append(parser.OFPActionOutput(dst_port))
+        else:
+            actions.append(parser.OFPActionGroup(dst_port))
         if len(flow_info) == 7:
             if flow_info[-3] == 6:
                 if flow_info[-2] == 'src':
@@ -416,11 +488,69 @@ class ShortestForwarding(app_manager.RyuApp):
         ip2Int = lambda x:sum([256**j*int(i) for j,i in enumerate(x.split('.')[::-1])])
         return (ip2Int(ip_addr) & 0xF0000000) == 0xE0000000
 
-    def shortest_forwarding_mcast(self, msg, eth_type, src_ip, dst_ip):
+    def shortest_forwarding_mcast(self, msg, eth_type, ip_src, mcast_ip):
         """
              Calculate shortest forwarding path and Install them into datapaths.
              flow_info = (eth_type, src_ip, dst_ip, in_port)
              or
              flow_info = (eth_type, ip_src, ip_dst, in_port, ip_proto, Flag, L4_port)
         """
-        pass
+        datapath = msg.datapath
+        in_port = msg.match['in_port']
+        pkt = packet.Packet(msg.data)
+        tcp_pkt = pkt.get_protocol(tcp.tcp)
+        udp_pkt = pkt.get_protocol(udp.udp)
+        ip_proto = None
+        L4_port = None
+        Flag = None
+        # Get ip_proto and L4 port number.
+        ip_proto, L4_port, Flag = self.get_L4_info(tcp_pkt, udp_pkt, ip_proto, L4_port, Flag)
+        host_ips = self._mcastAddr2HostIPs(mcast_ip)
+        results = [self.get_sw(datapath.id, in_port, ip_src, host_ip) for host_ip in host_ips]
+
+        if results:
+            dsts = [result[1] for result in results]
+            src = results[0][0]
+            path_dict = self.get_path_mcast(src, mcast_ip, dsts)
+            dpid_port_to_hosts = [self.awareness.get_host_location(host_ip) for host_ip in host_ips]
+            dpid2port_dict = {}
+            for dpid_port in dpid_port_to_hosts:
+                dpid2port_dict.setdefault(dpid_port[0], [])
+                dpid2port_dict[dpid_port[0]].append(dpid_port[1])
+            # Find the in port for each edge dpid
+            edge_dpid2in_port = {}
+            edge_dpids = dpid2port_dict.keys()
+            for (dpid, next_dpid_list) in path_dict:
+                for next_dpid in next_dpid_list:
+                    if next_dpid in edge_dpids:
+                        src_port = self.get_port_pair_from_link(self.awareness.link_to_port, dpid, next_dpid)[1]
+                        dpid2inport[next_dpid] = src_port
+
+            if ip_proto and L4_port and Flag:
+                if ip_proto == 6:
+                    L4_Proto = 'TCP'
+                elif ip_proto == 17:
+                    L4_Proto = 'UDP'
+                else:
+                    pass
+                self.logger.info("[PATH]%s<-->%s(%s Port:%d): %s" % (ip_src, mcast_ip, L4_Proto, L4_port, path_dict))
+                flow_info = (eth_type, ip_src, mcast_ip, in_port, ip_proto, Flag, L4_port)
+            else:
+                self.logger.info("[PATH]%s<-->%s: %s" % (ip_src, mcast_ip, path_dict))
+                flow_info = (eth_type, ip_src, mcast_ip, in_port)
+            self.install_mcast_flows(self.datapaths, self.awareness.link_to_port, path_dict, src, flow_info)
+            # Flow rules for edge switch
+            for (dpid, ports) in dpid2port_dict:
+                if len(ports) > 1:
+                    group_id = "".join(sorted(ports))
+                    self.send_flow_mod(self.datapaths[dpid], flow_info, edge_dpid2in_port[dpid],
+                                       int(group_id), isGroupId=True)
+                else:
+                    out_port = ports[0]
+                    self.send_flow_mod(self.datapaths[dpid], flow_info, edge_dpid2in_port[dpid], out_port)
+        else:
+            self.flood(msg)
+
+    def _mcastAddr2HostIPs(self, mcast_addr):
+        dst_ips = []
+        return dst_ips
