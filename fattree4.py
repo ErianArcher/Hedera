@@ -16,6 +16,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import itertools
+import json
 
 from mininet.net import Mininet
 from mininet.node import Controller, RemoteController
@@ -143,16 +144,25 @@ class Fattree(Topo):
 
 def set_host_ip(net, topo):
     hostlist = []
+    host2ip = {}
     for k in xrange(len(topo.HostList)):
         hostlist.append(net.get(topo.HostList[k]))
     i = 1
     j = 1
+    host_no = 1
     for host in hostlist:
-        host.setIP("10.%d.0.%d" % (i, j))
+        ip = "10.%d.0.%d" % (i, j)
+        host.setIP(ip)
+        # Construct host to ip mapping
+        host2ip[host_no] = ip
+        host_no +=1
+
         j += 1
         if j == topo.density+1:
             j = 1
             i += 1
+    with open("host_ip.json", "w") as host2ip_json:
+        json.dump(host2ip, host2ip_json)
 
 def create_subnetList(topo, num):
     """
@@ -366,8 +376,8 @@ def createTopo(pod, density, ip="127.0.0.1", port=6653, bw_c2a=10, bw_a2e=10, bw
     net.start()
 
     # Set OVS's protocol as OF13.
-    # topo.set_ovs_protocol_13()
-    topo.set_ovs_mcast()
+    topo.set_ovs_protocol_13()
+    # topo.set_ovs_mcast()
     # Set hosts IP addresses.
     set_host_ip(net, topo)
     # Install proactive flow entries

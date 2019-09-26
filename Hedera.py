@@ -15,27 +15,23 @@
 # implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 
 from ryu import cfg
 from ryu.base import app_manager
 from ryu.controller import ofp_event
-from ryu.controller import event
 from ryu.controller.handler import MAIN_DISPATCHER, DEAD_DISPATCHER
 from ryu.controller.handler import set_ev_cls
-from ryu.controller.ofp_event import EventOFPStateChange
-from ryu.lib.dpid import str_to_dpid
-from ryu.ofproto import ofproto_v1_3
-from ryu.lib.packet import packet
-from ryu.lib.packet import ethernet
 from ryu.lib.packet import arp
+from ryu.lib.packet import ethernet
 from ryu.lib.packet import ipv4
+from ryu.lib.packet import packet
 from ryu.lib.packet import tcp
 from ryu.lib.packet import udp
-from ryu.lib import igmplib
+from ryu.ofproto import ofproto_v1_3
 
 import network_awareness
 import network_monitor
-import setting
 
 CONF = cfg.CONF
 
@@ -51,8 +47,7 @@ class ShortestForwarding(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
     _CONTEXTS = {
         "network_awareness": network_awareness.NetworkAwareness,
-        "network_monitor": network_monitor.NetworkMonitor,
-        "igmplib": igmplib.IgmpLib}
+        "network_monitor": network_monitor.NetworkMonitor}
 
     WEIGHT_MODEL = {'hop': 'weight', 'bw': 'bw'}
 
@@ -61,13 +56,19 @@ class ShortestForwarding(app_manager.RyuApp):
         self.name = "shortest_forwarding"
         self.awareness = kwargs["network_awareness"]
         self.monitor = kwargs["network_monitor"]
-        self._snoop = kwargs["igmplib"]
-        self._snoop.set_querier_mode(dpid=str_to_dpid('0000000000000001'), server_port=2)
         self.datapaths = {}
         """
         | Multicast address: {path_dict}|
         """
         self.mcast_paths = {}
+        """
+        | Multicast address infos {group_addr: hosts_list(No)}
+        """
+        self.maddr_hosts = self._read_json("maddr_hosts.json")
+        """
+        | Host ip infos {host No: ip}
+        """
+        self.host_ip = self._read_json("host_ip.json")
         self.weight = self.WEIGHT_MODEL[CONF.weight]
 
     @set_ev_cls(ofp_event.EventOFPStateChange, [MAIN_DISPATCHER, DEAD_DISPATCHER])
@@ -105,10 +106,15 @@ class ShortestForwarding(app_manager.RyuApp):
                 eth_type = pkt.get_protocols(ethernet.ethernet)[0].ethertype
                 src_ip = ip_pkt.src
                 dst_ip = ip_pkt.dst
-                if not self._isMCastAddr(dst_ip):
+                if not is_multicast_addr(dst_ip):
                     self.shortest_forwarding(msg, eth_type, src_ip, dst_ip)
                 else:
                     self.shortest_forwarding_mcast(msg, eth_type, src_ip, dst_ip)
+
+    def _read_json(self, json_fname):
+        with open(json_fname) as json_file:
+            data = json.load(json_file)
+        return data
 
     def add_flow(self, dp, priority, match, actions, idle_timeout=0, hard_timeout=0):
         """
@@ -247,23 +253,32 @@ class ShortestForwarding(app_manager.RyuApp):
             pass
 
     def get_path_mcast(self, src, mcast_addr, dsts):
+        self.logger.info("DEBUG (get_path_mcast): src(%s), mcast_addr(%s), dsts(%s)" % (src, mcast_addr, dsts))
         # Prune the path cannot reach `dsts`
         def dfs(path_dict, cur, dsts):
-            cur_sw_list = path_dict.get(cur)
+            cur_sw_list = path_dict.get(cur, [])
             if not cur_sw_list:
-                if not dsts.contains(cur):
+                # This means that the switch is the end of the path
+                if cur not in dsts:
                     return False
                 else:
                     return True
             else:
+                item_to_remove = []
                 for next_sw in cur_sw_list:
                     good_path = dfs(path_dict, next_sw, dsts)
                     if not good_path:
-                        path_dict.get(cur).remove(next_sw)
-                if not path_dict.get(cur):
+                        item_to_remove.append(next_sw)
+                # Remove the item needed to be removed
+                for item in item_to_remove:
+                    path_dict.get(cur).remove(item)
+                if not path_dict.get(cur, []):
+                    # Bug fixed
+                    path_dict.pop(cur)
                     return False
                 else:
                     return True
+
         if not self.mcast_paths.has_key(mcast_addr):
             bfs_dict = self.awareness.get_bfs_successor(src)
             dfs(bfs_dict, src, dsts)
@@ -287,18 +302,18 @@ class ShortestForwarding(app_manager.RyuApp):
         in_port = flow_info[3]
         first_dp = datapaths[src_sw]
         def dfs_path_dict(last_dpid, cur_dpid):
-            next_dpid_list = path_dict.get(cur_dpid)
-            port_pair = self.get_port_pair_from_link(link_to_port, last_dpid, cur_dpid)
-            port_pairs_next = [self.get_port_pair_from_link(link_to_port, cur_dpid, next_dpid) for next_dpid in
-                          next_dpid_list]
-            src_port = port_pair[1]
-            ports = [pair[0] for pair in port_pairs_next]
-            if src_port and ports:
-                group_id = int("".join(sorted(ports)))
-                datapath = datapaths[cur_dpid]
-                self.send_flow_mod(datapath, flow_info, src_port, group_id, isGroupId=True)
-            for next_dpid in next_dpid_list:
-                dfs_path_dict(cur_dpid, next_dpid)
+            if path_dict.has_key(cur_dpid):
+                next_dpid_list = path_dict.get(cur_dpid)
+                port_pair = self.get_port_pair_from_link(link_to_port, last_dpid, cur_dpid)
+                port_pairs_next = [self.get_port_pair_from_link(link_to_port, cur_dpid, next_dpid_tmp) for next_dpid_tmp in next_dpid_list]
+                src_port = port_pair[1]
+                ports = [pair[0] for pair in port_pairs_next]
+                if src_port and ports:
+                    # Bug fixed: leak the case of single port to forward
+                    datapath = datapaths[cur_dpid]
+                    self._install_port_list(datapath, flow_info, src_port, ports)
+                for next_dpid in next_dpid_list:
+                    dfs_path_dict(cur_dpid, next_dpid)
 
         # install flow for the src_sw
         first_port_pairs_next = []
@@ -306,11 +321,18 @@ class ShortestForwarding(app_manager.RyuApp):
             dfs_path_dict(src_sw, next_dpid)
             first_port_pairs_next.append(self.get_port_pair_from_link(link_to_port, src_sw, next_dpid))
 
-        first_ports = [first_port_pairs_next[0] for pair in first_port_pairs_next]
+        # Bug fixed: leak the case of single port to forward
+        first_ports = [pair[0] for pair in first_port_pairs_next]
         if in_port and first_ports:
-            group_id = int("".join(sorted(first_ports)))
-            self.send_flow_mod(first_dp, flow_info, in_port, group_id, isGroupId=True)
+            self._install_port_list(first_dp, flow_info, in_port, first_ports)
 
+    def _install_port_list(self, datapath, flow_info, in_port, out_ports):
+        if len(out_ports) > 1:
+            group_id = self._to_group_id(out_ports)
+            self.send_flow_mod(datapath, flow_info, in_port, group_id, isGroupId=True)
+        else:
+            out_port = out_ports[0]
+            self.send_flow_mod(datapath, flow_info, in_port, out_port)
 
     def get_sw(self, dpid, in_port, src, dst):
         """
@@ -484,9 +506,12 @@ class ShortestForwarding(app_manager.RyuApp):
             # Flood is not good.
             self.flood(msg)
 
-    def _isMCastAddr(self, ip_addr):
-        ip2Int = lambda x:sum([256**j*int(i) for j,i in enumerate(x.split('.')[::-1])])
-        return (ip2Int(ip_addr) & 0xF0000000) == 0xE0000000
+    def _to_group_id(self, ports_to_forward):
+        reversed_ordered_port_list = sorted(ports_to_forward, reverse=True)
+        sum = 0
+        for i in range(0, len(reversed_ordered_port_list)):
+            sum += reversed_ordered_port_list[i] * (10 ** i)
+        return sum
 
     def shortest_forwarding_mcast(self, msg, eth_type, ip_src, mcast_ip):
         """
@@ -505,22 +530,30 @@ class ShortestForwarding(app_manager.RyuApp):
         Flag = None
         # Get ip_proto and L4 port number.
         ip_proto, L4_port, Flag = self.get_L4_info(tcp_pkt, udp_pkt, ip_proto, L4_port, Flag)
-        host_ips = self._mcastAddr2HostIPs(mcast_ip)
+        host_ips = self._maddr2host_ips(mcast_ip)
         results = [self.get_sw(datapath.id, in_port, ip_src, host_ip) for host_ip in host_ips]
 
         if results:
+            """
+            self.logger.info("DEBUG: nodes(%s) edges(%s)" %
+                             (self.awareness.graph.nodes(), self.awareness.graph.edges()))
+            self.logger.info("DEBUG: link_to_port(%s) access_ports(%s)" %
+                             (self.awareness.link_to_port, self.awareness.access_ports))
+            """
+            self.logger.info("DEBUG: results(%s)" % results)
             dsts = [result[1] for result in results]
             src = results[0][0]
             path_dict = self.get_path_mcast(src, mcast_ip, dsts)
             dpid_port_to_hosts = [self.awareness.get_host_location(host_ip) for host_ip in host_ips]
             dpid2port_dict = {}
+            self.logger.info("DEBUG: path_dict(%s)" % path_dict)
             for dpid_port in dpid_port_to_hosts:
                 dpid2port_dict.setdefault(dpid_port[0], [])
                 dpid2port_dict[dpid_port[0]].append(dpid_port[1])
             # Find the in port for each edge dpid
             edge_dpid2in_port = {}
             edge_dpids = dpid2port_dict.keys()
-            for (dpid, next_dpid_list) in path_dict:
+            for dpid, next_dpid_list in path_dict.iteritems():
                 for next_dpid in next_dpid_list:
                     if next_dpid in edge_dpids:
                         src_port = self.get_port_pair_from_link(self.awareness.link_to_port, dpid, next_dpid)[1]
@@ -540,17 +573,28 @@ class ShortestForwarding(app_manager.RyuApp):
                 flow_info = (eth_type, ip_src, mcast_ip, in_port)
             self.install_mcast_flows(self.datapaths, self.awareness.link_to_port, path_dict, src, flow_info)
             # Flow rules for edge switch
-            for (dpid, ports) in dpid2port_dict:
-                if len(ports) > 1:
-                    group_id = "".join(sorted(ports))
-                    self.send_flow_mod(self.datapaths[dpid], flow_info, edge_dpid2in_port[dpid],
-                                       int(group_id), isGroupId=True)
+            for dpid, ports in dpid2port_dict.iteritems():
+                self.logger.info(
+                    "DEBUG: dpid2port_dict(%s), edge_dpid2in_port(%s)" % (dpid2port_dict, edge_dpid2in_port))
+                # Case of neighbors
+                if dpid == src:
+                    self._install_port_list(self.datapaths[src], flow_info, in_port, ports)
                 else:
-                    out_port = ports[0]
-                    self.send_flow_mod(self.datapaths[dpid], flow_info, edge_dpid2in_port[dpid], out_port)
+                    self._install_port_list(self.datapaths[dpid], flow_info, edge_dpid2in_port[dpid], ports)
         else:
             self.flood(msg)
 
-    def _mcastAddr2HostIPs(self, mcast_addr):
+    def _maddr2host_ips(self, mcast_addr):
         dst_ips = []
+        # self.logger.info("DEBUG: maddr2host_ips (%s)" % mcast_addr)
+        for hostNo in self.maddr_hosts.get(mcast_addr, []):
+            if self.host_ip.has_key(hostNo):
+                dst_ips.append(self.host_ip[hostNo])
+        # self.logger.info("DEBUG: maddr2host_ips dsts(%s)" % dst_ips)
+        # self.logger.info("DEBUG: maddr2host_ips host_ip(%s)" % self.host_ip)
+        # self.logger.info("DEBUG: maddr2host_ips hosts(%s)" % self.maddr_hosts.get(mcast_addr, []))
         return dst_ips
+
+def is_multicast_addr(ip_addr):
+    ip2Int = lambda x: sum([256 ** j * int(i) for j, i in enumerate(x.split('.')[::-1])])
+    return (ip2Int(ip_addr) & 0xF0000000) == 0xE0000000
