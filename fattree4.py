@@ -338,6 +338,61 @@ def _get_subset(nports, nelements):
     origin_set = range(1, nports+1)
     return itertools.combinations(origin_set, nelements)
 
+def gen_maddr_host_group_json(filename, worker_num=16):
+    with open(filename, "w") as json_file:
+        maddr_host_group = _gen_maddr_host_group(worker_num)
+        json.dump(maddr_host_group, json_file)
+
+def _gen_maddr_host_group(worker_num):
+    init_ip_int = 0
+    maddr_host_group = {}
+    for i in range(2, worker_num):
+        subsets = _get_subset(worker_num, i)
+        for group in subsets:
+            maddr_group, init_ip_int = _next_maddr(init_ip_int)
+            maddr_host_group[maddr_group] = list(group)
+    return maddr_host_group
+
+"""
+Some masks for ip conversion
+"""
+field1_mask = 255
+field2_mask = 255 << 8
+field3_mask = 255 << 16
+field4_mask = 255 << 24
+field4_maddr_mask = (255 - 224) << 24
+
+def _next_maddr(init_ip_int):
+    if init_ip_int == 0:
+        init_ip_int = _ip_to_int("224.0.1.1")
+    if (init_ip_int & field1_mask) == 0:
+        init_ip_int += 1
+    # Error case
+    init_ip_int += 1
+    if ((field4_maddr_mask & init_ip_int) >> 24)  > 15:
+        init_ip_int -= 1
+        return _int_to_ip(init_ip_int), init_ip_int
+    else:
+        return _int_to_ip(init_ip_int), init_ip_int
+
+def _ip_to_int(ip):
+    fields = ip.split(".")
+    ip_int = 0
+    if len(fields) < 4:
+        print "Error: IP format %s" % ip
+    else:
+        for i in range(0, len(fields)):
+            shift = 32 - (i + 1) * 8
+            ip_int += (int(fields[i]) << shift)
+    return ip_int
+
+def _int_to_ip(ip_int):
+    field1 = str((ip_int & field1_mask))
+    field2 = str((ip_int & field2_mask) >> 8)
+    field3 = str((ip_int & field3_mask) >> 16)
+    field4 = str((ip_int & field4_mask) >> 24)
+    return "%s.%s.%s.%s" % (field4, field3, field2, field1)
+
 def iperfTest(net, topo):
     """
         Start iperf test.
@@ -385,6 +440,9 @@ def createTopo(pod, density, ip="127.0.0.1", port=6653, bw_c2a=10, bw_a2e=10, bw
     # dumpNodeConnections(net.hosts)
     # pingTest(net)
     # iperfTest(net, topo)
+
+    # Generate multicast address
+    gen_maddr_host_group_json("maddr_hosts.json")
 
     CLI(net)
     net.stop()
