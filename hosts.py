@@ -14,7 +14,7 @@ logger = logging.getLogger( __name__ )
 
 class DockerHost( Host ):
     "Docker host"
-    def __init__( self, name, image='ubuntu-exp', dargs=None, startString=None, **kwargs ):
+    def __init__( self, name, image='ubuntu-exp', dargs=None, startString=None, bridge="control-net",**kwargs ):
         self.image = image
         self.dargs = dargs
         if startString is None:
@@ -22,6 +22,10 @@ class DockerHost( Host ):
             self.dargs = "-di"
         else:
             self.startString = startString
+        if bridge is None:
+            self.docker_bridge = "none"
+        else:
+            self.docker_bridge = bridge
         Host.__init__( self, name, **kwargs )
 
     #def cmd( self, *args, **kwargs ):
@@ -117,8 +121,8 @@ class DockerHost( Host ):
         cmd = ["docker","run","--privileged","-h","mn-"+self.name ,"--name=mininet-"+self.name]
         if self.dargs is not None:
             cmd.extend([self.dargs])
-        cmd.extend(["--net=none",self.image,self.startString])
-        print cmd;
+        cmd.extend(["--network=%s" % self.docker_bridge,self.image,self.startString])
+        print cmd
 
         self.shell = Popen( cmd, stdin=PIPE, stdout=PIPE, stderr=STDOUT, close_fds=True )
         self.stdin = self.shell.stdin
