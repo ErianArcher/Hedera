@@ -13,8 +13,8 @@ logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger( __name__ )
 
 class DockerHost( Host ):
-    "Docker host"
-    def __init__( self, name, image='ubuntu-exp', dargs=None, startString=None, bridge="control-net",**kwargs ):
+    """Docker host"""
+    def __init__( self, name, image='ubuntu-exp', dargs=None, startString=None, bridge="control-net", **kwargs):
         self.image = image
         self.dargs = dargs
         if startString is None:

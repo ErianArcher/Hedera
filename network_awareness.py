@@ -15,6 +15,7 @@
 # implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from collections import deque
 
 import networkx as nx
 import matplotlib.pyplot as plt
@@ -160,6 +161,7 @@ class NetworkAwareness(app_manager.RyuApp):
 		self.switches = [sw.dp.id for sw in switch_list]
 		links = get_link(self.topology_api_app)
 		self.logger.info("DEBUG: switches(%s)" % switch_list)
+		# self.logger.info("DEBUG: switches(%s)" % switch_list[0].name)
 		self.logger.info("DEBUG: links(%s)" % links)
 		self.create_interior_links(links)
 		self.create_access_ports()
@@ -207,6 +209,33 @@ class NetworkAwareness(app_manager.RyuApp):
 
 	def get_bfs_successor(self, source):
 		return nx.bfs_successors(self.graph, source)
+
+	def neighbors(self, src, exclusive=None):
+		src_neighbors = nx.neighbors(self.graph, src)
+		if exclusive in src_neighbors:
+			src_neighbors.remove(exclusive)
+		return src_neighbors
+
+	def bfs_tree(self, source, depth_limit=None, exclusive_neighbor=None):
+		visited = {source}
+
+		if not depth_limit:
+			depth_limit = len(self.graph)
+
+		queue = deque([(source, depth_limit, self.neighbors(source, exclusive_neighbor))])
+		tree = {}
+		while queue:
+			parent, depth_now, children = queue[0]
+			next_children = []
+			for child in children:
+				if child not in visited:
+					next_children.append(child)
+					visited.add(child)
+					if depth_now > 1:
+						queue.append((child, depth_now - 1, self.neighbors(child)))
+			if next_children:
+				tree[parent] = next_children
+		return tree
 
 	def create_port_map(self, switch_list):
 		"""

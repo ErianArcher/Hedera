@@ -253,7 +253,21 @@ class ShortestForwarding(app_manager.RyuApp):
             pass
 
     def get_path_mcast(self, src, mcast_addr, dsts):
+        """
+        The original strategy can be used to calculate the multicast path from core switch to destination switches.
+        Main steps
+        1. Judge if there is any of destination switches in the same pod of the source switch.
+        2. If the set of destination switches in the same pod of the source switch is not empty,
+        3. For each partial path, calculate the remaining part from the core switch to destination switches.
+        4. Use network_monitor to find the best path with abundant bandwidth.
+        :param src: The source switch
+        :param mcast_addr: The multicast address
+        :param dsts: The destination switches
+        :return: List of paths
+        """
         self.logger.info("DEBUG (get_path_mcast): src(%s), mcast_addr(%s), dsts(%s)" % (src, mcast_addr, dsts))
+        k_port = len(self.awareness.switch_port_table.values()[0])
+
         # Prune the path cannot reach `dsts`
         def dfs(path_dict, cur, dsts):
             cur_sw_list = path_dict.get(cur, [])
@@ -279,6 +293,9 @@ class ShortestForwarding(app_manager.RyuApp):
                 else:
                     return True
 
+        # Get all possible paths
+
+
         if not self.mcast_paths.has_key(mcast_addr):
             bfs_dict = self.awareness.get_bfs_successor(src)
             dfs(bfs_dict, src, dsts)
@@ -301,11 +318,13 @@ class ShortestForwarding(app_manager.RyuApp):
             return
         in_port = flow_info[3]
         first_dp = datapaths[src_sw]
+
         def dfs_path_dict(last_dpid, cur_dpid):
             if path_dict.has_key(cur_dpid):
                 next_dpid_list = path_dict.get(cur_dpid)
                 port_pair = self.get_port_pair_from_link(link_to_port, last_dpid, cur_dpid)
-                port_pairs_next = [self.get_port_pair_from_link(link_to_port, cur_dpid, next_dpid_tmp) for next_dpid_tmp in next_dpid_list]
+                port_pairs_next = [self.get_port_pair_from_link(link_to_port, cur_dpid, next_dpid_tmp) for next_dpid_tmp
+                                   in next_dpid_list]
                 src_port = port_pair[1]
                 ports = [pair[0] for pair in port_pairs_next]
                 if src_port and ports:
@@ -354,7 +373,7 @@ class ShortestForwarding(app_manager.RyuApp):
         else:
             return None
 
-    def send_flow_mod(self, datapath, flow_info, src_port, dst_port, isGroupId = False):
+    def send_flow_mod(self, datapath, flow_info, src_port, dst_port, isGroupId=False):
         """
             Build flow entry, and send it to datapath.
             flow_info = (eth_type, src_ip, dst_ip, in_port)
@@ -594,6 +613,7 @@ class ShortestForwarding(app_manager.RyuApp):
         # self.logger.info("DEBUG: maddr2host_ips host_ip(%s)" % self.host_ip)
         # self.logger.info("DEBUG: maddr2host_ips hosts(%s)" % self.maddr_hosts.get(mcast_addr, []))
         return dst_ips
+
 
 def is_multicast_addr(ip_addr):
     ip2Int = lambda x: sum([256 ** j * int(i) for j, i in enumerate(x.split('.')[::-1])])
