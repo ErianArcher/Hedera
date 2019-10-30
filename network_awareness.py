@@ -210,10 +210,13 @@ class NetworkAwareness(app_manager.RyuApp):
 	def get_bfs_successor(self, source):
 		return nx.bfs_successors(self.graph, source)
 
-	def neighbors(self, src, exclusive=None):
+	def neighbors(self, src, exclusive=None, wo_src=True):
 		src_neighbors = nx.neighbors(self.graph, src)
 		if exclusive in src_neighbors:
 			src_neighbors.remove(exclusive)
+		if wo_src:  # wo_src (without src) is for fixing the bug that core switches cannot be found
+			if src in src_neighbors:
+				src_neighbors.remove(src)
 		return src_neighbors
 
 	def bfs_tree(self, source, depth_limit=None, exclusive_neighbor=None):
