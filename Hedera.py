@@ -58,7 +58,7 @@ class ShortestForwarding(app_manager.RyuApp):
         self.monitor = kwargs["network_monitor"]
         self.datapaths = {}
         """
-        | Multicast address: {path_dict}|
+        | {dpid: {Multicast address: [{path_dict},],},}|
         """
         self.mcast_paths = {}
         """
@@ -255,6 +255,9 @@ class ShortestForwarding(app_manager.RyuApp):
     def get_path_mcast(self, src, mcast_addr, dsts):
         """
         The original strategy can be used to calculate the multicast path from core switch to destination switches.
+        Cautions:
+        1. The core switches should be the switches that connects to one of the next switches of src_sw by BFS but do not connect to the others.
+        2. Find if there is any switch that is the target one in the next switches by BFS of the chosen one of the next switches of src_sw by BFS.
         Main steps
         1. Judge if there is any of destination switches in the same pod of the source switch.
         2. If the set of destination switches in the same pod of the source switch is not empty,
@@ -266,8 +269,40 @@ class ShortestForwarding(app_manager.RyuApp):
         :return: List of paths
         """
         self.logger.info("DEBUG (get_path_mcast): src(%s), mcast_addr(%s), dsts(%s)" % (src, mcast_addr, dsts))
-        k_port = len(self.awareness.switch_port_table.values()[0])
+        # k_port = len(self.awareness.switch_port_table.values()[0])
 
+        # Make sure that there is path dict key
+        if not self.mcast_paths.has_key(src):
+            self.mcast_paths[src] = {}
+        if not self.mcast_paths[src].has_key(mcast_addr):
+            self.mcast_paths[src][mcast_addr] = []
+
+        if not self.mcast_paths[src][mcast_addr]:
+            # Calculate all possible paths
+            self.calculate_multicast_paths(src, mcast_addr, dsts)
+            self.logger.info("Multicast path for %s: %s", mcast_addr, self.mcast_paths[src][mcast_addr])
+
+        # Choose the path with least cost.
+        path_dicts = self.mcast_paths[src][mcast_addr]
+        if self.weight == self.WEIGHT_MODEL['hop']:
+            best_path_dict = path_dicts[0]
+        elif self.weight == self.WEIGHT_MODEL['bw']:
+            # Because all paths will be calculated when we call self.monitor.get_best_path_by_bw,
+            # so we just need to call it once in a period, and then, we can get path directly.
+            # If path is existed just return it, else calculate and return it.
+            try:
+                best_path_dict = self.monitor.best_mcast_paths.get(src).get(mcast_addr)
+            except:
+                result = self.monitor.get_best_mcast_path_by_bw(self.awareness.graph, self.mcast_paths)
+                # result = (capabilities, best_mcast_path_dicts)
+                path_dicts = result[1]
+                best_path_dict = path_dicts.get(src).get(mcast_addr)
+        else:
+            empty_dict = {src: []}
+            best_path_dict = empty_dict
+        return best_path_dict
+
+    def calculate_multicast_paths(self, src, mcast_addr, dsts):
         # Prune the path cannot reach `dsts`
         def dfs(path_dict, cur, dsts):
             cur_sw_list = path_dict.get(cur, [])
@@ -294,15 +329,42 @@ class ShortestForwarding(app_manager.RyuApp):
                     return True
 
         # Get all possible paths
+        aggr_sws = self.awareness.neighbors(src)
+        self.logger.info("Aggregate switches: %s", aggr_sws)
+        for aggr_sw in aggr_sws:
+            # New paths
+            core_sws = []
+            intrapod_dst_sws = []
+            next_sws = self.awareness.neighbors(aggr_sw, exclusive=src)
+            for next_sw in next_sws:
+                if next_sw in dsts:
+                    # Should be added to the path.
+                    intrapod_dst_sws.append(next_sw)
+                elif self._is_core_switch(next_sw, aggr_sw, aggr_sws):
+                    # Should be added to th                                                                                                      e path.
+                    core_sws.append(next_sw)
+                else:
+                    # Should be the intra-pod switch but not destination.
+                    pass
+            # Begin to calculate paths
+            self.logger.info("Core switches: %s", core_sws)
+            for core_sw in core_sws:
+                half = self.awareness.bfs_tree(core_sw, exclusive_neighbor=aggr_sw)
+                dfs(half, core_sw, dsts)
+                # Merge the first half to the path dict
+                half[src] = [aggr_sw]
+                aggr_sw_path_dict = [core_sw]
+                aggr_sw_path_dict.extend(intrapod_dst_sws)
+                half[aggr_sw] = aggr_sw_path_dict
+                self.mcast_paths[src][mcast_addr].append(half)
 
-
-        if not self.mcast_paths.has_key(mcast_addr):
-            bfs_dict = self.awareness.get_bfs_successor(src)
-            dfs(bfs_dict, src, dsts)
-            self.mcast_paths[mcast_addr] = bfs_dict
-        else:
-            bfs_dict = self.mcast_paths.get(mcast_addr)
-        return bfs_dict
+    def _is_core_switch(self, sw, parent_sw, aggr_sws):
+        next_sw_neighbors = self.awareness.neighbors(sw, exclusive=parent_sw)
+        # Check if their intersection is not empty
+        flag = True
+        for check_sw in aggr_sws:
+            if check_sw in next_sw_neighbors:
+                flag = False
 
     def install_mcast_flows(self, datapaths, link_to_port, path_dict, src_sw, flow_info):
         """

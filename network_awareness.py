@@ -160,9 +160,9 @@ class NetworkAwareness(app_manager.RyuApp):
 		self.create_port_map(switch_list)
 		self.switches = [sw.dp.id for sw in switch_list]
 		links = get_link(self.topology_api_app)
-		self.logger.info("DEBUG: switches(%s)" % switch_list)
+		# self.logger.info("DEBUG: switches(%s)" % switch_list)
 		# self.logger.info("DEBUG: switches(%s)" % switch_list[0].name)
-		self.logger.info("DEBUG: links(%s)" % links)
+		# self.logger.info("DEBUG: links(%s)" % links)
 		self.create_interior_links(links)
 		self.create_access_ports()
 		self.graph = self.get_graph(self.link_to_port.keys())

@@ -58,6 +58,7 @@ class NetworkMonitor(app_manager.RyuApp):
         self.graph = None
         self.capabilities = None
         self.best_paths = None
+        self.best_mcast_paths = None # {dpid: {mcast_addr: {},},}
         # Create four data structures for Hedera specially.
         self.hostsList = []
         self.flows = []   # Record flows that need to be rescheduled. (hmc)
@@ -79,6 +80,7 @@ class NetworkMonitor(app_manager.RyuApp):
             self.stats['port'] = {}
             self.capabilities = None
             self.best_paths = None
+            self.best_mcast_paths = None
             self.statRecord = []
             self.flows = []
             for dp in self.datapaths.values():
@@ -467,6 +469,21 @@ class NetworkMonitor(app_manager.RyuApp):
         else:
             return min_bw
 
+    def get_min_bw_of_links_of_path_dict(self, graph, path_dict, min_bw):
+        """
+            Getting bandwidth of path. Actually, the mininum bandwidth
+            of links is the path_dict's bandwith, because it is the bottleneck of multicast path.
+        """
+        minimal_band_width = min_bw
+        for pre in path_dict:
+            for curr in path_dict[pre]:
+                if 'bandwidth' in graph[pre][curr]:
+                    bw = graph[pre][curr]['bandwidth']
+                    minimal_band_width = min(bw, minimal_band_width)
+                else:
+                    continue
+        return minimal_band_width
+
     def get_best_path_by_bw(self, graph, paths):
         """
             Get best path by comparing paths.
@@ -498,6 +515,38 @@ class NetworkMonitor(app_manager.RyuApp):
         self.capabilities = capabilities
         self.best_paths = best_paths
         return capabilities, best_paths
+
+    def get_best_mcast_path_by_bw(self, graph, path_dicts):
+        """
+            Get best multicast path dict by comparing paths.
+            Note: This function is called in EFattree module.
+        """
+        capabilities = {}
+        best_path_dicts = copy.deepcopy(path_dicts)
+
+        for src in path_dicts:
+            for mcast_addr in path_dicts[src]:
+                if src == mcast_addr:
+                    best_path_dicts[src][src] = {src: []} # empty path dict
+                    capabilities.setdefault(src, {src: setting.MAX_CAPACITY})
+                    capabilities[src][src] = setting.MAX_CAPACITY
+                else:
+                    max_bw_of_paths = 0
+                    best_path_dict = path_dicts[src][mcast_addr][0]
+                    for path_dict in path_dicts[src][mcast_addr]:
+                        min_bw = setting.MAX_CAPACITY
+                        min_bw = self.get_min_bw_of_links_of_path_dict(graph, path_dict, min_bw)
+                        if min_bw > max_bw_of_paths:
+                            max_bw_of_paths = min_bw
+                            best_path_dict = path_dict
+                    best_path_dicts[src][mcast_addr] = best_path_dict
+                    capabilities.setdefault(src, {mcast_addr: max_bw_of_paths})
+                    capabilities[src][mcast_addr] = max_bw_of_paths
+
+        # self.capabilities and self.best_path_dicts have no actual utility in this module.
+        self.capabilities = capabilities
+        self.best_paths = best_path_dicts
+        return capabilities, best_path_dicts
 
     def create_bw_graph(self, bw_dict):
         """
