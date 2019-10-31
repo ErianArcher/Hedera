@@ -268,7 +268,7 @@ class ShortestForwarding(app_manager.RyuApp):
         :param dsts: The destination switches
         :return: List of paths
         """
-        self.logger.info("DEBUG (get_path_mcast): src(%s), mcast_addr(%s), dsts(%s)" % (src, mcast_addr, dsts))
+        self.logger.debug("DEBUG (get_path_mcast): src(%s), mcast_addr(%s), dsts(%s)" % (src, mcast_addr, dsts))
         # k_port = len(self.awareness.switch_port_table.values()[0])
 
         # Make sure that there is path dict key
@@ -280,11 +280,11 @@ class ShortestForwarding(app_manager.RyuApp):
         if not self.mcast_paths[src][mcast_addr]:
             # Calculate all possible paths
             self.calculate_multicast_paths(src, mcast_addr, dsts)
-            self.logger.info("Multicast path for %s: %s", mcast_addr, self.mcast_paths[src][mcast_addr])
 
         # Choose the path with least cost.
         path_dicts = self.mcast_paths[src][mcast_addr]
         if self.weight == self.WEIGHT_MODEL['hop']:
+            # TODO: Random select one path.
             best_path_dict = path_dicts[0]
         elif self.weight == self.WEIGHT_MODEL['bw']:
             # Because all paths will be calculated when we call self.monitor.get_best_path_by_bw,
@@ -300,22 +300,24 @@ class ShortestForwarding(app_manager.RyuApp):
         else:
             empty_dict = {src: []}
             best_path_dict = empty_dict
+        self.logger.debug("Multicast path for %s: %s, the best is: %s",
+                         mcast_addr, self.mcast_paths[src][mcast_addr], best_path_dict)
         return best_path_dict
 
     def calculate_multicast_paths(self, src, mcast_addr, dsts):
         # Prune the path cannot reach `dsts`
-        def dfs(path_dict, cur, dsts):
+        def dfs(path_dict, cur, dsts_dfs):
             cur_sw_list = path_dict.get(cur, [])
             if not cur_sw_list:
                 # This means that the switch is the end of the path
-                if cur not in dsts:
+                if cur not in dsts_dfs:
                     return False
                 else:
                     return True
             else:
                 item_to_remove = []
                 for next_sw in cur_sw_list:
-                    good_path = dfs(path_dict, next_sw, dsts)
+                    good_path = dfs(path_dict, next_sw, dsts_dfs)
                     if not good_path:
                         item_to_remove.append(next_sw)
                 # Remove the item needed to be removed
@@ -324,13 +326,20 @@ class ShortestForwarding(app_manager.RyuApp):
                 if not path_dict.get(cur, []):
                     # Bug fixed
                     path_dict.pop(cur)
-                    return False
+                    # Bug fixed: When the destination is the leaf node, it cannot recognize the path.
+                    if cur in dsts_dfs:
+                        return True
+                    else:
+                        return False
                 else:
                     return True
 
         # Get all possible paths
         aggr_sws = self.awareness.neighbors(src)
-        self.logger.info("Aggregate switches: %s", aggr_sws)
+        # Locate all the core switches
+        self.awareness.register_core_switch(src)
+
+        self.logger.debug("Aggregate switches: %s", aggr_sws)
         for aggr_sw in aggr_sws:
             # New paths
             core_sws = []
@@ -340,31 +349,25 @@ class ShortestForwarding(app_manager.RyuApp):
                 if next_sw in dsts:
                     # Should be added to the path.
                     intrapod_dst_sws.append(next_sw)
-                elif self._is_core_switch(next_sw, aggr_sw, aggr_sws):
+                elif self.awareness.is_core_switch(next_sw, aggr_sw, aggr_sws):
                     # Should be added to th                                                                                                      e path.
                     core_sws.append(next_sw)
                 else:
                     # Should be the intra-pod switch but not destination.
                     pass
             # Begin to calculate paths
-            self.logger.info("Core switches: %s", core_sws)
+            self.logger.debug("Core switches: %s", core_sws)
             for core_sw in core_sws:
-                half = self.awareness.bfs_tree(core_sw, exclusive_neighbor=aggr_sw)
+                half = self.awareness.bfs_tree(core_sw, exclusive_neighbor=aggr_sw, wo_core_switch=True)
+                self.logger.debug("[Debug] BFS tree of (%s): %s", core_sw, half)
                 dfs(half, core_sw, dsts)
+                self.logger.debug("[Debug] BFS tree after dfs of (%s): %s", core_sw, half)
                 # Merge the first half to the path dict
                 half[src] = [aggr_sw]
                 aggr_sw_path_dict = [core_sw]
                 aggr_sw_path_dict.extend(intrapod_dst_sws)
                 half[aggr_sw] = aggr_sw_path_dict
                 self.mcast_paths[src][mcast_addr].append(half)
-
-    def _is_core_switch(self, sw, parent_sw, aggr_sws):
-        next_sw_neighbors = self.awareness.neighbors(sw, exclusive=parent_sw)
-        # Check if their intersection is not empty
-        flag = True
-        for check_sw in aggr_sws:
-            if check_sw in next_sw_neighbors:
-                flag = False
 
     def install_mcast_flows(self, datapaths, link_to_port, path_dict, src_sw, flow_info):
         """
@@ -378,23 +381,46 @@ class ShortestForwarding(app_manager.RyuApp):
         if not path_dict:
             self.logger.info("Path error!")
             return
-        in_port = flow_info[3]
-        first_dp = datapaths[src_sw]
 
         def dfs_path_dict(last_dpid, cur_dpid):
+            """
+            Function for installing flow on the switches in the path.
+            :param last_dpid: The data path's id for the last switch
+            :param cur_dpid: The data path's id for the current switch
+            """
             if path_dict.has_key(cur_dpid):
                 next_dpid_list = path_dict.get(cur_dpid)
                 port_pair = self.get_port_pair_from_link(link_to_port, last_dpid, cur_dpid)
                 port_pairs_next = [self.get_port_pair_from_link(link_to_port, cur_dpid, next_dpid_tmp) for next_dpid_tmp
                                    in next_dpid_list]
                 src_port = port_pair[1]
-                ports = [pair[0] for pair in port_pairs_next]
+                ports = [_pair[0] for _pair in port_pairs_next]
                 if src_port and ports:
                     # Bug fixed: leak the case of single port to forward
                     datapath = datapaths[cur_dpid]
                     self._install_port_list(datapath, flow_info, src_port, ports)
                 for next_dpid in next_dpid_list:
                     dfs_path_dict(cur_dpid, next_dpid)
+
+        # For edge switch
+        mcast_ip = flow_info[2]
+        host_ips = self._maddr2host_ips(mcast_ip)
+        dpid_port_to_hosts = [self.awareness.get_host_location(host_ip) for host_ip in host_ips]
+        dpid2port_dict = {}
+        for dpid_port in dpid_port_to_hosts:
+            dpid2port_dict.setdefault(dpid_port[0], [])
+            dpid2port_dict[dpid_port[0]].append(dpid_port[1])
+        # Find the in port for each edge dpid
+        edge_dpid2in_port = {}
+        edge_dpids = dpid2port_dict.keys()
+        for dpid, next_dpid_list in path_dict.iteritems():
+            for next_dpid in next_dpid_list:
+                if next_dpid in edge_dpids:
+                    src_port = self.get_port_pair_from_link(self.awareness.link_to_port, dpid, next_dpid)[1]
+                    edge_dpid2in_port[next_dpid] = src_port
+        # Origin
+        in_port = flow_info[3]
+        first_dp = datapaths[src_sw]
 
         # install flow for the src_sw
         first_port_pairs_next = []
@@ -403,11 +429,28 @@ class ShortestForwarding(app_manager.RyuApp):
             first_port_pairs_next.append(self.get_port_pair_from_link(link_to_port, src_sw, next_dpid))
 
         # Bug fixed: leak the case of single port to forward
+        # Bug fixed: Same dst cannot have two different flow action.
         first_ports = [pair[0] for pair in first_port_pairs_next]
         if in_port and first_ports:
-            self._install_port_list(first_dp, flow_info, in_port, first_ports)
+            ports = dpid2port_dict.get(src_sw, []) # Get or else empty list (!flag1)
+            ports.extend(first_ports)
+            self._install_port_list(first_dp, flow_info, in_port, ports)
+
+        # Flow rules for edge switch
+        for dpid, ports in dpid2port_dict.iteritems():
+            self.logger.debug(
+                "DEBUG: dpid2port_dict(%s), edge_dpid2in_port(%s)" % (dpid2port_dict, edge_dpid2in_port))
+            # Case of neighbors
+            if dpid == src_sw:
+                # Bug fixed: When the host ip is not the neighbor of sender,
+                # the flow table of src_sw cannot be installed
+                # Solution: Move code to (flag1)
+                pass
+            else:
+                self._install_port_list(self.datapaths[dpid], flow_info, edge_dpid2in_port[dpid], ports)
 
     def _install_port_list(self, datapath, flow_info, in_port, out_ports):
+        self.logger.debug("[Debug] Data path(%s) is installed: out ports(%s)", datapath, out_ports)
         if len(out_ports) > 1:
             group_id = self._to_group_id(out_ports)
             self.send_flow_mod(datapath, flow_info, in_port, group_id, isGroupId=True)
@@ -574,10 +617,10 @@ class ShortestForwarding(app_manager.RyuApp):
                         L4_Proto = 'UDP'
                     else:
                         pass
-                    self.logger.info("[PATH]%s<-->%s(%s Port:%d): %s" % (ip_src, ip_dst, L4_Proto, L4_port, path))
+                    self.logger.debug("[PATH]%s<-->%s(%s Port:%d): %s" % (ip_src, ip_dst, L4_Proto, L4_port, path))
                     flow_info = (eth_type, ip_src, ip_dst, in_port, ip_proto, Flag, L4_port)
                 else:
-                    self.logger.info("[PATH]%s<-->%s: %s" % (ip_src, ip_dst, path))
+                    self.logger.debug("[PATH]%s<-->%s: %s" % (ip_src, ip_dst, path))
                     flow_info = (eth_type, ip_src, ip_dst, in_port)
                 # Install flow entries to datapaths along the path.
                 self.install_flow(self.datapaths,
@@ -621,24 +664,11 @@ class ShortestForwarding(app_manager.RyuApp):
             self.logger.info("DEBUG: link_to_port(%s) access_ports(%s)" %
                              (self.awareness.link_to_port, self.awareness.access_ports))
             """
-            self.logger.info("DEBUG: results(%s)" % results)
+            self.logger.debug("DEBUG: results(%s)" % results)
             dsts = [result[1] for result in results]
             src = results[0][0]
             path_dict = self.get_path_mcast(src, mcast_ip, dsts)
-            dpid_port_to_hosts = [self.awareness.get_host_location(host_ip) for host_ip in host_ips]
-            dpid2port_dict = {}
-            self.logger.info("DEBUG: path_dict(%s)" % path_dict)
-            for dpid_port in dpid_port_to_hosts:
-                dpid2port_dict.setdefault(dpid_port[0], [])
-                dpid2port_dict[dpid_port[0]].append(dpid_port[1])
-            # Find the in port for each edge dpid
-            edge_dpid2in_port = {}
-            edge_dpids = dpid2port_dict.keys()
-            for dpid, next_dpid_list in path_dict.iteritems():
-                for next_dpid in next_dpid_list:
-                    if next_dpid in edge_dpids:
-                        src_port = self.get_port_pair_from_link(self.awareness.link_to_port, dpid, next_dpid)[1]
-                        edge_dpid2in_port[next_dpid] = src_port
+            self.logger.debug("DEBUG: path_dict(%s)" % path_dict)
 
             if ip_proto and L4_port and Flag:
                 if ip_proto == 6:
@@ -647,21 +677,12 @@ class ShortestForwarding(app_manager.RyuApp):
                     L4_Proto = 'UDP'
                 else:
                     pass
-                self.logger.info("[PATH]%s<-->%s(%s Port:%d): %s" % (ip_src, mcast_ip, L4_Proto, L4_port, path_dict))
+                self.logger.debug("[PATH]%s<-->%s(%s Port:%d): %s" % (ip_src, mcast_ip, L4_Proto, L4_port, path_dict))
                 flow_info = (eth_type, ip_src, mcast_ip, in_port, ip_proto, Flag, L4_port)
             else:
-                self.logger.info("[PATH]%s<-->%s: %s" % (ip_src, mcast_ip, path_dict))
+                self.logger.debug("[PATH]%s<-->%s: %s" % (ip_src, mcast_ip, path_dict))
                 flow_info = (eth_type, ip_src, mcast_ip, in_port)
             self.install_mcast_flows(self.datapaths, self.awareness.link_to_port, path_dict, src, flow_info)
-            # Flow rules for edge switch
-            for dpid, ports in dpid2port_dict.iteritems():
-                self.logger.info(
-                    "DEBUG: dpid2port_dict(%s), edge_dpid2in_port(%s)" % (dpid2port_dict, edge_dpid2in_port))
-                # Case of neighbors
-                if dpid == src:
-                    self._install_port_list(self.datapaths[src], flow_info, in_port, ports)
-                else:
-                    self._install_port_list(self.datapaths[dpid], flow_info, edge_dpid2in_port[dpid], ports)
         else:
             self.flood(msg)
 

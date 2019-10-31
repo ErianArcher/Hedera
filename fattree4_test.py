@@ -25,7 +25,7 @@ from mininet.log import setLogLevel
 from mininet.link import Link, Intf, TCLink
 from mininet.topo import Topo
 from mininet.util import dumpNodeConnections
-from hosts import DockerHost
+# from hosts import DockerHost
 
 import logging
 import os
@@ -88,7 +88,7 @@ class Fattree(Topo):
                 PREFIX = "h0"
             else:
                 PREFIX = "h00"
-            self.HostList.append(self.addHost(PREFIX + str(i), cls=DockerHost))
+            self.HostList.append(self.addHost(PREFIX + str(i)))
 
     def createLinks(self, bw_c2a=10, bw_a2e=10, bw_e2h=10):
         """
