@@ -3,7 +3,7 @@ from subprocess import call
 import os
 import argparse
 
-parser = argparse.ArgumentParser("simple_example")
+parser = argparse.ArgumentParser("Lab starter")
 parser.add_argument('--hostnum', dest='hostnum', type=int, required=True,
                     help='The amount of hosts')
 parser.add_argument('-P', '--lab_program', dest='addition_filename', required=True,
