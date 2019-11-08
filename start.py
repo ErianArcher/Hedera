@@ -39,10 +39,10 @@ def copy_required_files(container_name, addition_file=None):
 
 
 def run_lab_program(container_name, lab_program, *args):
-    run_cmd = ['docker', 'exec', '-d', container_name, 'scala /' + lab_program]
-    run_cmd.extend(args)
+    run_cmd = ["docker exec -dt " + container_name + " scala -J-Xmx3072m -J-Xms1536m /" + lab_program + " " + " ".join(args)]
     print run_cmd
-    pidp = Popen(run_cmd, stdin=PIPE, stdout=PIPE, stderr=STDOUT, close_fds=False)
+    pidp = call(run_cmd, shell=True)
+    psef = call(["docker exec -it " + container_name + " ps -ef"], shell=True)
 
 
 if __name__ == '__main__':
