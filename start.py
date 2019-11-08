@@ -16,7 +16,6 @@ startString = "/bin/bash"
 dargs = "-di"
 docker_bridge = "control-net"
 
-
 def get_host_container_name(hostNO):
     prefix = "mininet-"
     if hostNO < 10:
@@ -25,7 +24,6 @@ def get_host_container_name(hostNO):
         return prefix+"h0"+str(hostNO)
     else:
         return prefix + "h" + str(hostNO)
-
 
 def copy_required_files(container_name, addition_file=None):
     files = ['maddr_hosts.json', 'host_ip.json', 'lab_config.json']
