@@ -19,11 +19,20 @@ docker_bridge = "control-net"
 def get_host_container_name(hostNO):
     prefix = "mininet-"
     if hostNO < 10:
-        return prefix+"h00"+str(hostNO)
+        return prefix + "h00" + str(hostNO)
     elif hostNO < 100:
-        return prefix+"h0"+str(hostNO)
+        return prefix + "h0" + str(hostNO)
     else:
         return prefix + "h" + str(hostNO)
+
+def get_host_nic(hostNO):
+    postfix = "-eth0"
+    if hostNO < 10:
+        return "h00" + str(hostNO) + postfix
+    elif hostNO < 100:
+        return "h0" + str(hostNO) + postfix
+    else:
+        return "h" + str(hostNO) + postfix
 
 def copy_required_files(container_name, addition_file=None):
     files = ['maddr_hosts.json', 'host_ip.json', 'lab_config.json']
@@ -35,6 +44,9 @@ def copy_required_files(container_name, addition_file=None):
         print copy_cmd
         pidp = Popen(copy_cmd, stdin=PIPE, stdout=PIPE, stderr=STDOUT, close_fds=False)
 
+def set_up_multicast_routing(hostNO, container_name):
+    call(["docker exec -it " + container_name + " ip route add 224.0.0.0/29 dev " + get_host_nic(hostNO)], shell=True)
+    call(["docker exec -it " + container_name + " ip route change default via 10.0.0.1 dev " + get_host_nic(hostNO)], shell=True)
 
 def run_lab_program(container_name, lab_program, *args):
     run_cmd = ["docker exec -dt " + container_name + " scala -J-Xmx3072m -J-Xms1536m /" + lab_program + " " + " ".join(args)]
@@ -70,4 +82,5 @@ if __name__ == '__main__':
         run_lab_program(scheduler_container_name, lab_program, 'controller')
         for hostNO in range(1, hostNum+1):
             host_container_name = get_host_container_name(hostNO)
+            set_up_multicast_routing(hostNO, host_container_name)
             run_lab_program(host_container_name, lab_program, 'host', str(hostNO))

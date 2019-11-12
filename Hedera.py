@@ -65,6 +65,7 @@ class ShortestForwarding(app_manager.RyuApp):
         | Multicast address infos {group_addr: hosts_list(No)}
         """
         self.maddr_hosts = self._read_json("maddr_hosts.json")
+        # self.logger.info("Debug: Multicast address to hosts %s", self.maddr_hosts)
         """
         | Host ip infos {host No: ip}
         """
@@ -107,8 +108,10 @@ class ShortestForwarding(app_manager.RyuApp):
                 src_ip = ip_pkt.src
                 dst_ip = ip_pkt.dst
                 if not is_multicast_addr(dst_ip):
+                    self.logger.info("Debug: Unicast address (%s)", dst_ip)
                     self.shortest_forwarding(msg, eth_type, src_ip, dst_ip)
                 else:
+                    self.logger.info("Debug: Multicast address (%s)", dst_ip)
                     self.shortest_forwarding_mcast(msg, eth_type, src_ip, dst_ip)
 
     def _read_json(self, json_fname):
@@ -510,12 +513,12 @@ class ShortestForwarding(app_manager.RyuApp):
                     match = parser.OFPMatch(
                         in_port=src_port, eth_type=flow_info[0],
                         ipv4_src=flow_info[1], ipv4_dst=flow_info[2],
-                        ip_proto=17, udp_src=flow_info[-1])
+                        ip_proto=17) # , udp_src=flow_info[-1]
                 elif flow_info[-2] == 'dst':
                     match = parser.OFPMatch(
                         in_port=src_port, eth_type=flow_info[0],
                         ipv4_src=flow_info[1], ipv4_dst=flow_info[2],
-                        ip_proto=17, udp_dst=flow_info[-1])
+                        ip_proto=17) # , udp_dst=flow_info[-1]
                 else:
                     pass
         elif len(flow_info) == 4:
@@ -655,6 +658,7 @@ class ShortestForwarding(app_manager.RyuApp):
         # Get ip_proto and L4 port number.
         ip_proto, L4_port, Flag = self.get_L4_info(tcp_pkt, udp_pkt, ip_proto, L4_port, Flag)
         host_ips = self._maddr2host_ips(mcast_ip)
+        self.logger.info("DEBUG: hosts' ip (%s)" % host_ips)
         results = [self.get_sw(datapath.id, in_port, ip_src, host_ip) for host_ip in host_ips]
 
         if results:
@@ -664,11 +668,11 @@ class ShortestForwarding(app_manager.RyuApp):
             self.logger.info("DEBUG: link_to_port(%s) access_ports(%s)" %
                              (self.awareness.link_to_port, self.awareness.access_ports))
             """
-            self.logger.debug("DEBUG: results(%s)" % results)
+            # self.logger.info("DEBUG: results(%s)" % results)
             dsts = [result[1] for result in results]
             src = results[0][0]
             path_dict = self.get_path_mcast(src, mcast_ip, dsts)
-            self.logger.debug("DEBUG: path_dict(%s)" % path_dict)
+            self.logger.info("DEBUG: path_dict(%s)" % path_dict)
 
             if ip_proto and L4_port and Flag:
                 if ip_proto == 6:
@@ -690,8 +694,10 @@ class ShortestForwarding(app_manager.RyuApp):
         dst_ips = []
         # self.logger.info("DEBUG: maddr2host_ips (%s)" % mcast_addr)
         for hostNo in self.maddr_hosts.get(mcast_addr, []):
-            if self.host_ip.has_key(hostNo):
-                dst_ips.append(self.host_ip[hostNo])
+            # self.logger.info("DEBUG: maddr2host_ips hostNO(%s)" % str(hostNo))
+            """ Bug fixed: In the case that `hostNO` is not a string of numeric. """
+            if self.host_ip.has_key(str(hostNo)):
+                dst_ips.append(self.host_ip[str(hostNo)])
         # self.logger.info("DEBUG: maddr2host_ips dsts(%s)" % dst_ips)
         # self.logger.info("DEBUG: maddr2host_ips host_ip(%s)" % self.host_ip)
         # self.logger.info("DEBUG: maddr2host_ips hosts(%s)" % self.maddr_hosts.get(mcast_addr, []))
