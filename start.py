@@ -45,7 +45,7 @@ def copy_required_files(container_name, addition_file=None):
         pidp = Popen(copy_cmd, stdin=PIPE, stdout=PIPE, stderr=STDOUT, close_fds=False)
 
 def set_up_multicast_routing(hostNO, container_name):
-    call(["docker exec -it " + container_name + " ip route add 224.0.0.0/29 dev " + get_host_nic(hostNO)], shell=True)
+    call(["docker exec -it " + container_name + " ip route add 224.0.0.0/4 dev " + get_host_nic(hostNO)], shell=True)
     call(["docker exec -it " + container_name + " ip route change default via 10.0.0.1 dev " + get_host_nic(hostNO)], shell=True)
 
 def run_lab_program(container_name, lab_program, *args):

@@ -80,13 +80,15 @@ class NetworkAwareness(app_manager.RyuApp):
         self.initiation_delay = self.get_initiation_delay(CONF.fanout)
         self.start_time = time.time()
 
+        # Get topology when initialized.
+        self.get_topology(None)
         # Start a green thread to discover network resource.
         self.discover_thread = hub.spawn(self._discover)
 
     def _discover(self):
         i = 0
         while True:
-            self.show_topology()
+            # self.show_topology()
             if i == 2:   # Reload topology every 20 seconds.
                 self.get_topology(None)
                 i = 0

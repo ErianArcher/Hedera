@@ -16,12 +16,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import time
+from threading import Thread
 
 from ryu import cfg
 from ryu.base import app_manager
 from ryu.controller import ofp_event
 from ryu.controller.handler import MAIN_DISPATCHER, DEAD_DISPATCHER
 from ryu.controller.handler import set_ev_cls
+from ryu.lib import hub
 from ryu.lib.packet import arp
 from ryu.lib.packet import ethernet
 from ryu.lib.packet import ipv4
@@ -32,6 +35,7 @@ from ryu.ofproto import ofproto_v1_3
 
 import network_awareness
 import network_monitor
+import setting
 
 CONF = cfg.CONF
 
@@ -71,6 +75,46 @@ class ShortestForwarding(app_manager.RyuApp):
         """
         self.host_ip = self._read_json("host_ip.json")
         self.weight = self.WEIGHT_MODEL[CONF.weight]
+
+        # self.discover_thread = hub.spawn(self._discover_mcast_paths)
+
+    def _discover_mcast_paths(self):
+        i = 0
+        while not self.mcast_paths:
+            self.logger.info("mcast_paths (%s)" % len(self.mcast_paths))
+            if i == 3:  # Reload topology every 30 seconds.
+                hub.spawn(self._init_mcast_paths)
+                # self._init_mcast_paths()
+                i = 0
+            hub.sleep(setting.DISCOVERY_PERIOD)
+            i = i + 1
+
+    def _init_mcast_paths(self):
+        """
+            Get all path for multicast path.
+        """
+        if len(self.awareness.graph) <= 0:
+            self.logger.info("The switches has not been discovered yet.")
+        elif not self.mcast_paths:
+            for maddr in self.maddr_hosts:
+                dst_host_ips = self._maddr2host_ips(maddr)
+                src_host_ips = []
+                for host_ip in self.host_ip.values():
+                    if host_ip not in dst_host_ips:
+                        src_host_ips.append(host_ip)
+                dsts = set([self.awareness.get_host_location(host_ip)[0] for host_ip in dst_host_ips])
+                srcs = set([self.awareness.get_host_location(host_ip)[0] for host_ip in src_host_ips])
+                # self.logger.info("Srcs: (%s); and Dsts: (%s)", srcs, dsts)
+                for src in srcs:
+                    # Make sure that there is path dict key
+                    if not self.mcast_paths.has_key(src):
+                        self.mcast_paths[src] = {}
+                    if not self.mcast_paths[src].has_key(maddr):
+                        self.mcast_paths[src][maddr] = []
+                    self.calculate_multicast_paths(src, maddr, dsts)
+            self.logger.info("mcast_paths (%s)" % len(self.mcast_paths))
+        else:
+            self.logger.info("All installed mcast_paths (%s)" % len(self.mcast_paths))
 
     @set_ev_cls(ofp_event.EventOFPStateChange, [MAIN_DISPATCHER, DEAD_DISPATCHER])
     def _ofp_state_change_handler(self, ev):
@@ -360,17 +404,28 @@ class ShortestForwarding(app_manager.RyuApp):
                     pass
             # Begin to calculate paths
             self.logger.debug("Core switches: %s", core_sws)
-            for core_sw in core_sws:
-                half = self.awareness.bfs_tree(core_sw, exclusive_neighbor=aggr_sw, wo_core_switch=True)
-                self.logger.debug("[Debug] BFS tree of (%s): %s", core_sw, half)
-                dfs(half, core_sw, dsts)
-                self.logger.debug("[Debug] BFS tree after dfs of (%s): %s", core_sw, half)
-                # Merge the first half to the path dict
-                half[src] = [aggr_sw]
-                aggr_sw_path_dict = [core_sw]
-                aggr_sw_path_dict.extend(intrapod_dst_sws)
-                half[aggr_sw] = aggr_sw_path_dict
+            only_intrapod_route = False
+            if src in dsts:
+                if len(dsts) - 1 == len(intrapod_dst_sws):
+                    only_intrapod_route = True
+            else:
+                if len(dsts) == len(intrapod_dst_sws):
+                    only_intrapod_route = True
+            if only_intrapod_route:
+                half = {src: [aggr_sw], aggr_sw: intrapod_dst_sws}
                 self.mcast_paths[src][mcast_addr].append(half)
+            else:
+                for core_sw in core_sws:
+                    half = self.awareness.bfs_tree(core_sw, exclusive_neighbor=aggr_sw, wo_core_switch=True)
+                    self.logger.debug("[Debug] BFS tree of (%s): %s", core_sw, half)
+                    dfs(half, core_sw, dsts)
+                    self.logger.debug("[Debug] BFS tree after dfs of (%s): %s", core_sw, half)
+                    # Merge the first half to the path dict
+                    half[src] = [aggr_sw]
+                    aggr_sw_path_dict = [core_sw]
+                    aggr_sw_path_dict.extend(intrapod_dst_sws)
+                    half[aggr_sw] = aggr_sw_path_dict
+                    self.mcast_paths[src][mcast_addr].append(half)
 
     def install_mcast_flows(self, datapaths, link_to_port, path_dict, src_sw, flow_info):
         """
@@ -529,7 +584,7 @@ class ShortestForwarding(app_manager.RyuApp):
             pass
 
         self.add_flow(datapath, 30, match, actions,
-                      idle_timeout=5, hard_timeout=10)
+                      idle_timeout=5, hard_timeout=0)
 
     def install_flow(self, datapaths, link_to_port, path, flow_info, buffer_id, data=None):
         '''
@@ -669,7 +724,7 @@ class ShortestForwarding(app_manager.RyuApp):
                              (self.awareness.link_to_port, self.awareness.access_ports))
             """
             # self.logger.info("DEBUG: results(%s)" % results)
-            dsts = [result[1] for result in results]
+            dsts = set([result[1] for result in results])
             src = results[0][0]
             path_dict = self.get_path_mcast(src, mcast_ip, dsts)
             self.logger.info("DEBUG: path_dict(%s)" % path_dict)
