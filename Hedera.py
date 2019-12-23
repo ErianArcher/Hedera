@@ -348,7 +348,7 @@ class ShortestForwarding(app_manager.RyuApp):
             empty_dict = {src: []}
             best_path_dict = empty_dict
         self.logger.debug("Multicast path for %s: %s, the best is: %s",
-                         mcast_addr, self.mcast_paths[src][mcast_addr], best_path_dict)
+                          mcast_addr, self.mcast_paths[src][mcast_addr], best_path_dict)
         return best_path_dict
 
     def calculate_multicast_paths(self, src, mcast_addr, dsts):
@@ -397,7 +397,7 @@ class ShortestForwarding(app_manager.RyuApp):
                     # Should be added to the path.
                     intrapod_dst_sws.append(next_sw)
                 elif self.awareness.is_core_switch(next_sw, aggr_sw, aggr_sws):
-                    # Should be added to th                                                                                                      e path.
+                    # Should be added to the path.
                     core_sws.append(next_sw)
                 else:
                     # Should be the intra-pod switch but not destination.
@@ -426,6 +426,19 @@ class ShortestForwarding(app_manager.RyuApp):
                     aggr_sw_path_dict.extend(intrapod_dst_sws)
                     half[aggr_sw] = aggr_sw_path_dict
                     self.mcast_paths[src][mcast_addr].append(half)
+
+    def install_mcast_flow_single_sw(self, cur_sw, datapaths, link_to_port, path_dict, flow_info):
+        out_port = cur_sw.ofproto.OFPP_LOCAL
+        if cur_sw in path_dict:
+            next_dps = path_dict[cur_sw]
+
+            port_pairs = [self.get_port_pair_from_link(link_to_port, cur_sw, next_dp) for next_dp in next_dps]
+            ports = [port_pair[0] for port_pair in port_pairs]
+            src_port = flow_info[3]
+            if src_port and ports:
+                self._install_port_list(datapaths[cur_sw], flow_info, src_port, ports)
+        else:
+            self.send_flow_mod(datapaths[cur_sw], flow_info, flow_info[3], out_port)
 
     def install_mcast_flows(self, datapaths, link_to_port, path_dict, src_sw, flow_info):
         """
@@ -490,7 +503,7 @@ class ShortestForwarding(app_manager.RyuApp):
         # Bug fixed: Same dst cannot have two different flow action.
         first_ports = [pair[0] for pair in first_port_pairs_next]
         if in_port and first_ports:
-            ports = dpid2port_dict.get(src_sw, []) # Get or else empty list (!flag1)
+            ports = dpid2port_dict.get(src_sw, [])  # Get or else empty list (!flag1)
             ports.extend(first_ports)
             self._install_port_list(first_dp, flow_info, in_port, ports)
 
@@ -568,12 +581,12 @@ class ShortestForwarding(app_manager.RyuApp):
                     match = parser.OFPMatch(
                         in_port=src_port, eth_type=flow_info[0],
                         ipv4_src=flow_info[1], ipv4_dst=flow_info[2],
-                        ip_proto=17) # , udp_src=flow_info[-1]
+                        ip_proto=17)  # , udp_src=flow_info[-1]
                 elif flow_info[-2] == 'dst':
                     match = parser.OFPMatch(
                         in_port=src_port, eth_type=flow_info[0],
                         ipv4_src=flow_info[1], ipv4_dst=flow_info[2],
-                        ip_proto=17) # , udp_dst=flow_info[-1]
+                        ip_proto=17)  # , udp_dst=flow_info[-1]
                 else:
                     pass
         elif len(flow_info) == 4:
