@@ -416,7 +416,7 @@ def pingTest(net):
     """
     net.pingAll()
 
-def createTopo(pod, density, ip="127.0.0.1", port=6653, bw_c2a=100, bw_a2e=100, bw_e2h=100):
+def createTopo(pod, density, ip="127.0.0.1", port=6653, bw_c2a=10, bw_a2e=10, bw_e2h=1):
     """
         Create network topology and run the Mininet.
     """

@@ -76,15 +76,15 @@ class ShortestForwarding(app_manager.RyuApp):
         self.host_ip = self._read_json("host_ip.json")
         self.weight = self.WEIGHT_MODEL[CONF.weight]
 
-        # self.discover_thread = hub.spawn(self._discover_mcast_paths)
+        self.discover_thread = hub.spawn(self._discover_mcast_paths)
 
     def _discover_mcast_paths(self):
         i = 0
         while not self.mcast_paths:
             self.logger.info("mcast_paths (%s)" % len(self.mcast_paths))
             if i == 3:  # Reload topology every 30 seconds.
-                hub.spawn(self._init_mcast_paths)
-                # self._init_mcast_paths()
+                # hub.spawn(self._init_mcast_paths)
+                self._init_mcast_paths()
                 i = 0
             hub.sleep(setting.DISCOVERY_PERIOD)
             i = i + 1
@@ -98,21 +98,28 @@ class ShortestForwarding(app_manager.RyuApp):
         elif not self.mcast_paths:
             for maddr in self.maddr_hosts:
                 dst_host_ips = self._maddr2host_ips(maddr)
-                src_host_ips = []
-                for host_ip in self.host_ip.values():
-                    if host_ip not in dst_host_ips:
-                        src_host_ips.append(host_ip)
-                dsts = set([self.awareness.get_host_location(host_ip)[0] for host_ip in dst_host_ips])
-                srcs = set([self.awareness.get_host_location(host_ip)[0] for host_ip in src_host_ips])
-                # self.logger.info("Srcs: (%s); and Dsts: (%s)", srcs, dsts)
-                for src in srcs:
-                    # Make sure that there is path dict key
-                    if not self.mcast_paths.has_key(src):
-                        self.mcast_paths[src] = {}
-                    if not self.mcast_paths[src].has_key(maddr):
-                        self.mcast_paths[src][maddr] = []
-                    self.calculate_multicast_paths(src, maddr, dsts)
-            self.logger.info("mcast_paths (%s)" % len(self.mcast_paths))
+                if len(dst_host_ips) == 2:
+                    src_host_ips = []
+                    for host_ip in self.host_ip.values():
+                        if host_ip not in dst_host_ips:
+                            src_host_ips.append(host_ip)
+                    dsts = set([self.awareness.get_host_location(host_ip)[0] for host_ip in dst_host_ips])
+                    srcs = [(self.awareness.get_host_location(host_ip), host_ip) for host_ip in src_host_ips]
+                    # self.logger.info("Srcs: (%s); and Dsts: (%s)", srcs, dsts)
+                    for src_info in srcs:
+                        src = src_info[0][0]
+                        in_port = src_info[0][1]
+                        src_host_ip = src_info[1]
+                        # Make sure that there is path dict key
+                        if not self.mcast_paths.has_key(src):
+                            self.mcast_paths[src] = {}
+                        if not self.mcast_paths[src].has_key(maddr):
+                            self.mcast_paths[src][maddr] = []
+                        path_dict = self.get_path_mcast(src, maddr, dsts)
+                        self.logger.info("DEBUG: path for {%s}:{%s}" % (src_host_ip, maddr))
+                        flow_info = (-1, src_host_ip, maddr, in_port)
+                        self.install_mcast_flows(self.datapaths, self.awareness.link_to_port, path_dict, src, flow_info)
+                self.logger.info("mcast_paths (%s)" % len(self.mcast_paths))
         else:
             self.logger.info("All installed mcast_paths (%s)" % len(self.mcast_paths))
 
@@ -521,7 +528,7 @@ class ShortestForwarding(app_manager.RyuApp):
                 self._install_port_list(self.datapaths[dpid], flow_info, edge_dpid2in_port[dpid], ports)
 
     def _install_port_list(self, datapath, flow_info, in_port, out_ports):
-        self.logger.debug("[Debug] Data path(%s) is installed: out ports(%s)", datapath, out_ports)
+        self.logger.info("[Debug] Data path(%s) is installed: out ports(%s)", datapath, out_ports)
         if len(out_ports) > 1:
             group_id = self._to_group_id(out_ports)
             self.send_flow_mod(datapath, flow_info, in_port, group_id, isGroupId=True)
@@ -591,13 +598,13 @@ class ShortestForwarding(app_manager.RyuApp):
                     pass
         elif len(flow_info) == 4:
             match = parser.OFPMatch(
-                in_port=src_port, eth_type=flow_info[0],
+                in_port=src_port, # eth_type=flow_info[0],
                 ipv4_src=flow_info[1], ipv4_dst=flow_info[2])
         else:
             pass
 
         self.add_flow(datapath, 30, match, actions,
-                      idle_timeout=30, hard_timeout=0)
+                      idle_timeout=0, hard_timeout=0)
 
     def install_flow(self, datapaths, link_to_port, path, flow_info, buffer_id, data=None):
         '''

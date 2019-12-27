@@ -131,6 +131,26 @@ class NetworkMonitor(app_manager.RyuApp):
              independent of a port, we calculate the current load of a port only
              using tx_bytes while finding routing path.
         """
+        ports = []
+        for stat in ev.msg.body:
+            ports.append('port_no=%d '
+                         'rx_packets=%d tx_packets=%d '
+                         'rx_bytes=%d tx_bytes=%d '
+                         'rx_dropped=%d tx_dropped=%d '
+                         'rx_errors=%d tx_errors=%d '
+                         'rx_frame_err=%d rx_over_err=%d rx_crc_err=%d '
+                         'collisions=%d duration_sec=%d duration_nsec=%d' %
+                         (stat.port_no,
+                          stat.rx_packets, stat.tx_packets,
+                          stat.rx_bytes, stat.tx_bytes,
+                          stat.rx_dropped, stat.tx_dropped,
+                          stat.rx_errors, stat.tx_errors,
+                          stat.rx_frame_err, stat.rx_over_err,
+                          stat.rx_crc_err, stat.collisions,
+                          stat.duration_sec, stat.duration_nsec))
+        self.logger.debug('PortStats: %s', ports)
+        with open('txinfo.log', 'a+') as logfile:
+            logfile.write('PortStats: %s' % ports)
         body = ev.msg.body
         dpid = ev.msg.datapath.id
         self.stats['port'][dpid] = body
